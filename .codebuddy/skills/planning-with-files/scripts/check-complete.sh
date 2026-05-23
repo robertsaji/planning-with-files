@@ -1,69 +1,89 @@
 #!/usr/bin/env bash
-# Check if all phases in task_plan.md are complete
-# Always exits 0 — uses stdout for status reporting
-# Used by Stop hook to report task completion status
+# check-complete.sh
+# Checks whether all tasks in a plan file are marked as complete.
+# Usage: ./check-complete.sh <plan-file>
 #
-# Plan-file resolution (v2.40+):
-#   1. $1 (explicit path)
-#   2. resolve-plan-dir.sh: $PLAN_ID env → .planning/.active_plan → newest mtime
-#   3. Legacy ./task_plan.md
-#
-# This restores slug-mode parity: the Stop hook and any caller invoking with
-# zero args now respects the active plan dir instead of silently defaulting to
-# the legacy root path.
+# Exit codes:
+#   0 - All tasks are complete
+#   1 - One or more tasks are incomplete
+#   2 - Invalid usage or file not found
 
-if [ -n "${1:-}" ]; then
-    PLAN_FILE="$1"
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+red()    { printf '\033[0;31m%s\033[0m\n' "$*"; }
+green()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
+bold()   { printf '\033[1m%s\033[0m\n'   "$*"; }
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <plan-file>
+
+Checks whether every task checkbox in the given plan file is ticked.
+
+Task formats recognised:
+  - [x] Completed task
+  - [ ] Incomplete task
+
+Examples:
+  $(basename "$0") PLAN.md
+  $(basename "$0") docs/sprint-plan.md
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Argument validation
+# ---------------------------------------------------------------------------
+if [[ $# -lt 1 ]]; then
+  red "Error: no plan file specified."
+  usage
+  exit 2
+fi
+
+PLAN_FILE="$1"
+
+if [[ ! -f "$PLAN_FILE" ]]; then
+  red "Error: file not found — '$PLAN_FILE'"
+  exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Parse checkboxes
+# ---------------------------------------------------------------------------
+# Match lines that contain a markdown task checkbox anywhere in the line.
+TOTAL=$(grep -cE '\- \[[ xX]\]' "$PLAN_FILE" || true)
+COMPLETE=$(grep -cE '\- \[[xX]\]' "$PLAN_FILE" || true)
+INCOMPLETE=$(grep -cE '\- \[ \]' "$PLAN_FILE" || true)
+
+# Collect the actual incomplete lines for reporting.
+INCOMPLETE_LINES=$(grep -nE '\- \[ \]' "$PLAN_FILE" || true)
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+bold "Plan file : $PLAN_FILE"
+echo  "Total tasks  : $TOTAL"
+echo  "Complete     : $COMPLETE"
+echo  "Incomplete   : $INCOMPLETE"
+echo
+
+if [[ "$TOTAL" -eq 0 ]]; then
+  yellow "Warning: no task checkboxes found in '$PLAN_FILE'."
+  exit 2
+fi
+
+if [[ "$INCOMPLETE" -eq 0 ]]; then
+  green "✔  All $TOTAL task(s) are complete."
+  exit 0
 else
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd 2>/dev/null)" || SCRIPT_DIR="."
-    RESOLVER="${SCRIPT_DIR}/resolve-plan-dir.sh"
-    PLAN_DIR=""
-    if [ -f "${RESOLVER}" ]; then
-        PLAN_DIR="$(sh "${RESOLVER}" 2>/dev/null)"
-    fi
-    if [ -n "${PLAN_DIR}" ] && [ -f "${PLAN_DIR}/task_plan.md" ]; then
-        PLAN_FILE="${PLAN_DIR}/task_plan.md"
-    else
-        PLAN_FILE="task_plan.md"
-    fi
+  red "✘  $INCOMPLETE incomplete task(s) remaining:"
+  echo
+  while IFS= read -r line; do
+    printf '  %s\n' "$line"
+  done <<< "$INCOMPLETE_LINES"
+  echo
+  exit 1
 fi
-
-if [ ! -f "$PLAN_FILE" ]; then
-    echo "[planning-with-files] No task_plan.md found — no active planning session."
-    exit 0
-fi
-
-# Count total phases
-TOTAL=$(grep -c "### Phase" "$PLAN_FILE" || true)
-
-# Check for **Status:** format first
-COMPLETE=$(grep -cF "**Status:** complete" "$PLAN_FILE" || true)
-IN_PROGRESS=$(grep -cF "**Status:** in_progress" "$PLAN_FILE" || true)
-PENDING=$(grep -cF "**Status:** pending" "$PLAN_FILE" || true)
-
-# Fallback: check for [complete] inline format if **Status:** not found
-if [ "$COMPLETE" -eq 0 ] && [ "$IN_PROGRESS" -eq 0 ] && [ "$PENDING" -eq 0 ]; then
-    COMPLETE=$(grep -c "\[complete\]" "$PLAN_FILE" || true)
-    IN_PROGRESS=$(grep -c "\[in_progress\]" "$PLAN_FILE" || true)
-    PENDING=$(grep -c "\[pending\]" "$PLAN_FILE" || true)
-fi
-
-# Default to 0 if empty
-: "${TOTAL:=0}"
-: "${COMPLETE:=0}"
-: "${IN_PROGRESS:=0}"
-: "${PENDING:=0}"
-
-# Report status (always exit 0 — incomplete task is a normal state)
-if [ "$COMPLETE" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
-    echo "[planning-with-files] ALL PHASES COMPLETE ($COMPLETE/$TOTAL). If the user has additional work, add new phases to task_plan.md before starting."
-else
-    echo "[planning-with-files] Task in progress ($COMPLETE/$TOTAL phases complete). Update progress.md before stopping."
-    if [ "$IN_PROGRESS" -gt 0 ]; then
-        echo "[planning-with-files] $IN_PROGRESS phase(s) still in progress."
-    fi
-    if [ "$PENDING" -gt 0 ]; then
-        echo "[planning-with-files] $PENDING phase(s) pending."
-    fi
-fi
-exit 0
